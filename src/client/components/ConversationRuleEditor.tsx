@@ -1,3 +1,4 @@
+import { DialogHeader } from './DialogHeader';
 import type { ModelCatalog, ReplyModel, ReplyStyle } from '../../shared/types';
 import { ReplyStyleSelect } from './ReplyStyleSelect';
 import { ReplyModelSelect } from './ReplyModelSelect';
@@ -78,38 +79,43 @@ export function ConversationRuleEditor(props: ConversationRuleEditorProps) {
       )}
       <dialog
         ref={dialog}
+        style={{ width: 600 }}
         onClose={() => setIsOpen(false)}
         className="dpr-rule-dialog"
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
       >
-        <h2 id={titleId}>回复规则 · {props.name}</h2>
-        <p className="dpr-help" id={descriptionId}>
-          在全局公共规则基础上补充，冲突时以此处为准。文字规则优先于风格。
-        </p>
-        {isOpen && props.listModels && (
-          <div className="dpr-dialog-model">
-            <ReplyModelSelect
-              value={model}
-              onChange={setModel}
-              load={props.listModels}
-              defaultLabel="跟随全局回复模型"
-              help="仅用于此联系人的代答；不改变全局模型。"
+        <DialogHeader onClose={close}>
+          <h2 id={titleId}>回复规则 · {props.name}</h2>
+        </DialogHeader>
+        <div className="dpr-dialog-body dpr-stack">
+          <p className="dpr-help" id={descriptionId}>
+            在全局公共规则基础上补充，冲突时以此处为准。文字规则优先于风格。
+          </p>
+          {isOpen && props.listModels && (
+            <div className="dpr-dialog-model">
+              <ReplyModelSelect
+                value={model}
+                onChange={setModel}
+                load={props.listModels}
+                defaultLabel="跟随全局回复模型"
+                help="仅用于此联系人的代答；不改变全局模型。"
+              />
+            </div>
+          )}
+          <ReplyStyleSelect value={styleId} styles={props.styles} inherit onChange={setStyleId} />
+          <FormItem label="专属回复规则">
+            <Textarea
+              rows={7}
+              maxLength={12000}
+              value={draft}
+              placeholder="设置对当前会话的称呼、语气和回答范围"
+              onChange={(event) => setDraft(event.target.value)}
             />
-          </div>
-        )}
-        <ReplyStyleSelect value={styleId} styles={props.styles} inherit onChange={setStyleId} />
-        <FormItem label="专属回复规则">
-          <Textarea
-            rows={7}
-            maxLength={12000}
-            value={draft}
-            placeholder="设置对当前会话的称呼、语气和回答范围"
-            onChange={(event) => setDraft(event.target.value)}
-          />
-        </FormItem>
-        <p className="dpr-help">确认后更新页面草稿，点击页面底部“保存修改”后生效。</p>
-        <div className="dpr-actions dpr-dialog-actions">
+          </FormItem>
+          <p className="dpr-help">确认后更新页面草稿，点击页面底部“保存修改”后生效。</p>
+        </div>
+        <div className="dpr-actions dpr-dialog-footer">
           <ActionButton label="取消" onClick={close} />
           <ActionButton label="确认" onClick={confirm} primary={true} />
         </div>

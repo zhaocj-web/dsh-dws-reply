@@ -202,6 +202,8 @@ export function Knowledge(props: KnowledgeProps) {
       )}
       {editorOpen && (
         <KnowledgeDialog
+          width={680}
+
           title={editing ? '编辑资料' : '添加资料'}
           onClose={() => setEditorOpen(false)}
         >
@@ -214,24 +216,31 @@ export function Knowledge(props: KnowledgeProps) {
         </KnowledgeDialog>
       )}
       {creatingFolder && (
-        <KnowledgeDialog compact title="新建文件夹" onClose={() => setCreatingFolder(false)}>
+        <KnowledgeDialog
+          width={400}
+
+          title="新建文件夹"
+          onClose={() => setCreatingFolder(false)}
+        >
           <form
-            className="dpr-stack"
+            className="dpr-dialog-form"
             onSubmit={(event) => {
               event.preventDefault();
               createFolder();
             }}
           >
-            <FormItem label="文件夹名称" error={error}>
-              <Input
-                autoFocus
-                placeholder="输入文件夹名称"
-                value={folderName}
-                maxLength={80}
-                onChange={(event) => setFolderName(event.target.value)}
-              />
-            </FormItem>
-            <div className="dpr-knowledge-dialog-actions">
+            <div className="dpr-dialog-body">
+              <FormItem label="文件夹名称" error={error}>
+                <Input
+                  autoFocus
+                  placeholder="输入文件夹名称"
+                  value={folderName}
+                  maxLength={80}
+                  onChange={(event) => setFolderName(event.target.value)}
+                />
+              </FormItem>
+            </div>
+            <div className="dpr-actions dpr-dialog-footer">
               <ActionButton label="取消" onClick={() => setCreatingFolder(false)} />
               <ActionButton
                 label="创建"

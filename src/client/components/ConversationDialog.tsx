@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useLayoutEffect, useRef } from 'react';
 import type { ConversationKind, PluginSnapshot, RpcRequests } from '../../shared/types';
-import { IconButton } from './IconButton';
+import { DialogHeader } from './DialogHeader';
 import { RecordChat } from './RecordChat';
 import { ConversationComposer } from './ConversationComposer';
 
@@ -33,31 +33,19 @@ export function ConversationDialog(props: ConversationDialogProps) {
   return (
     <dialog
       ref={dialog}
+      style={{ width: 860 }}
       className="dpr-rule-dialog dpr-chat-dialog"
       aria-labelledby={titleId}
       onClose={props.onClose}
     >
-      <header className="dpr-chat-dialog-header">
+      <DialogHeader closeLabel="关闭对话" onClose={() => dialog.current?.close()}>
         <div>
           <h2 id={titleId}>{props.name}</h2>
           <p className="dpr-help">
             {props.kind === 'direct' ? '私聊' : '群聊'} · {records.length} 条已保存记录
           </p>
         </div>
-        <IconButton label="关闭对话" onClick={() => dialog.current?.close()}>
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            aria-hidden="true"
-          >
-            <path d="m6 6 12 12M18 6 6 18" />
-          </svg>
-        </IconButton>
-      </header>
+      </DialogHeader>
       <div
         ref={messages}
         className="dpr-chat-dialog-messages"

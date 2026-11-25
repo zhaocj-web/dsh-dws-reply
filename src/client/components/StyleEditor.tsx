@@ -1,3 +1,4 @@
+import { DialogHeader } from './DialogHeader';
 import React, { useEffect, useId, useRef, useState } from 'react';
 import type { ReplyStyle } from '../../shared/types';
 import { ActionButton } from './Controls';
@@ -23,12 +24,16 @@ export function StyleEditor(props: StyleEditorProps) {
   return (
     <dialog
       ref={dialog}
-      className="dpr-rule-dialog"
+      style={{ width: 640 }}
+      className="dpr-rule-dialog dpr-style-dialog"
       aria-labelledby={titleId}
       onClose={props.onClose}
     >
-      <h2 id={titleId}>编辑风格</h2>
+      <DialogHeader onClose={() => dialog.current?.close()}>
+        <h2 id={titleId}>编辑风格</h2>
+      </DialogHeader>
       <form
+        className="dpr-dialog-form"
         onSubmit={(event) => {
           event.preventDefault();
           props.onSave({
@@ -38,7 +43,7 @@ export function StyleEditor(props: StyleEditorProps) {
           });
         }}
       >
-        <div className="dpr-stack">
+        <div className="dpr-dialog-body dpr-stack">
           <FormGrid>
             <FormItem label="名称">
               <Input
@@ -81,16 +86,16 @@ export function StyleEditor(props: StyleEditorProps) {
               onChange={(event) => update('sample', event.target.value)}
             />
           </FormItem>
-          <div className="dpr-actions dpr-dialog-actions">
-            <ActionButton label="取消" onClick={() => dialog.current?.close()} />
-            <button
-              className="dpr-btn dpr-btn-primary"
-              type="submit"
-              disabled={!draft.name.trim() || !draft.instructions.trim()}
-            >
-              确认
-            </button>
-          </div>
+        </div>
+        <div className="dpr-actions dpr-dialog-footer">
+          <ActionButton label="取消" onClick={() => dialog.current?.close()} />
+          <button
+            className="dpr-btn dpr-btn-primary"
+            type="submit"
+            disabled={!draft.name.trim() || !draft.instructions.trim()}
+          >
+            确认
+          </button>
         </div>
       </form>
     </dialog>

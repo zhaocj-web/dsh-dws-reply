@@ -51,41 +51,46 @@ export function KnowledgeEditor(props: KnowledgeEditorProps) {
     }
   }
   return (
-    <div className="dpr-stack">
-      <FormItem label="导入文件" help="支持 .txt、.md；也可直接粘贴内容，按“问题 / 答案”维护问答。">
-        <Input
-          type="file"
-          accept=".txt,.md,.markdown"
-          disabled={busy}
-          onChange={(event) => {
-            void importFile(event.target.files?.[0]);
-            event.target.value = '';
-          }}
-        />
-      </FormItem>
-      <FormItem label="标题">
-        <Input
-          value={title}
-          maxLength={200}
-          disabled={busy}
-          onChange={(event) => setTitle(event.target.value)}
-        />
-      </FormItem>
-      <FormItem label="正文">
-        <Textarea
-          rows={10}
-          value={content}
-          maxLength={100000}
-          disabled={busy}
-          onChange={(event) => setContent(event.target.value)}
-        />
-      </FormItem>
-      {error && (
-        <p role="alert" className="dpr-error">
-          {error}
-        </p>
-      )}
-      <div className="dpr-knowledge-actions">
+    <div className="dpr-dialog-form">
+      <div className="dpr-dialog-body dpr-stack">
+        <FormItem
+          label="导入文件"
+          help="支持 .txt、.md；也可直接粘贴内容，按“问题 / 答案”维护问答。"
+        >
+          <Input
+            type="file"
+            accept=".txt,.md,.markdown"
+            disabled={busy}
+            onChange={(event) => {
+              void importFile(event.target.files?.[0]);
+              event.target.value = '';
+            }}
+          />
+        </FormItem>
+        <FormItem label="标题">
+          <Input
+            value={title}
+            maxLength={200}
+            disabled={busy}
+            onChange={(event) => setTitle(event.target.value)}
+          />
+        </FormItem>
+        <FormItem label="正文">
+          <Textarea
+            rows={10}
+            value={content}
+            maxLength={100000}
+            disabled={busy}
+            onChange={(event) => setContent(event.target.value)}
+          />
+        </FormItem>
+        {error && (
+          <p role="alert" className="dpr-error">
+            {error}
+          </p>
+        )}
+      </div>
+      <div className="dpr-actions dpr-dialog-footer">
         <ActionButton label="加入草稿" primary disabled={busy} onClick={save} />
         <ActionButton label="取消" disabled={busy} onClick={props.onClose} />
       </div>

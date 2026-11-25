@@ -6,7 +6,7 @@ import type {
 } from '../../../shared/knowledge';
 import { errorMessage } from '../../../shared/errors';
 import { ActionButton } from '../Controls';
-import { IconButton } from '../IconButton';
+import { DialogHeader } from '../DialogHeader';
 import { CopyButton } from '../CopyButton';
 
 type KnowledgePreviewProps = {
@@ -65,26 +65,14 @@ export function KnowledgePreview(props: KnowledgePreviewProps) {
   return (
     <dialog
       ref={dialog}
+      style={{ width: 800 }}
       className="dpr-rule-dialog dpr-knowledge-preview"
       aria-labelledby={titleId}
       onClose={props.onClose}
     >
-      <header className="dpr-chat-dialog-header">
+      <DialogHeader closeLabel="关闭预览" onClose={() => dialog.current?.close()}>
         <h2 id={titleId}>{document?.title ?? props.title}</h2>
-        <IconButton label="关闭预览" onClick={() => dialog.current?.close()}>
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            aria-hidden="true"
-          >
-            <path d="m6 6 12 12M18 6 6 18" />
-          </svg>
-        </IconButton>
-      </header>
+      </DialogHeader>
       <div className="dpr-knowledge-preview-body" aria-busy={loading}>
         {loading && (
           <p role="status" className="dpr-help">

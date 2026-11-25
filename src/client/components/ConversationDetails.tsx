@@ -1,5 +1,5 @@
 import React, { useId, useRef } from 'react';
-import { IconButton } from './IconButton';
+import { DialogHeader } from './DialogHeader';
 import type { PluginSnapshot } from '../../shared/types';
 import type { RecordConversation } from '../domain/record-conversations';
 import { isSmartReplyModel } from '../../shared/reply-model';
@@ -59,36 +59,26 @@ export function ConversationDetails(props: ConversationDetailsProps) {
       </button>
       <dialog
         ref={dialog}
+        style={{ width: 520 }}
         className="dpr-rule-dialog dpr-conversation-dialog"
         aria-labelledby={titleId}
       >
-        <header className="dpr-conversation-dialog-heading">
+        <DialogHeader closeLabel="关闭会话信息" onClose={() => dialog.current?.close()}>
           <h2 id={titleId}>会话信息</h2>
-          <IconButton label="关闭会话信息" onClick={() => dialog.current?.close()}>
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              aria-hidden="true"
-            >
-              <path d="m6 6 12 12M18 6 6 18" />
-            </svg>
-          </IconButton>
-        </header>
-        <dl className="dpr-config-descriptions">
-          {fields.map(([label, value]) => (
-            <div key={label}>
-              <dt>{label}</dt>
-              <dd>{value}</dd>
-            </div>
-          ))}
-        </dl>
-        <p className="dpr-help">
-          上下文从本地记录恢复，包含已送达回复与内部交流；每次实际使用的轮数可在“思考与处理记录”中查看。
-        </p>
+        </DialogHeader>
+        <div className="dpr-dialog-body">
+          <dl className="dpr-config-descriptions">
+            {fields.map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="dpr-help">
+            上下文从本地记录恢复，包含已送达回复与内部交流；每次实际使用的轮数可在“思考与处理记录”中查看。
+          </p>
+        </div>
       </dialog>
     </>
   );

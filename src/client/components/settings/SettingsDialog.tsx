@@ -1,3 +1,4 @@
+import { DialogHeader } from '../DialogHeader';
 import React, { useEffect, useId, useRef, useState } from 'react';
 import type { Endpoint, ModelCatalog, PluginSnapshot, ReplyConfig } from '../../../shared/types';
 import { ActionButton } from '../Controls';
@@ -36,38 +37,24 @@ export function SettingsDialog(props: SettingsDialogProps) {
   return (
     <dialog
       ref={dialog}
+      style={{ width: 800 }}
       className="dpr-settings-dialog"
       aria-labelledby={titleId}
       onClose={props.onClose}
     >
-      <header className="dpr-settings-header">
-        <h2 id={titleId}>设置</h2>
-        <div className="dpr-settings-header-actions">
+      <DialogHeader
+        closeLabel="关闭设置"
+        onClose={() => dialog.current?.close()}
+        actions={
           <ActionButton
             label="打开配置文件"
             disabled={props.isBusy}
             onClick={() => props.performAction('openConfigDirectory')}
           />
-          <button
-            type="button"
-            className="dpr-settings-trigger"
-            aria-label="关闭设置"
-            onClick={() => dialog.current?.close()}
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              aria-hidden="true"
-            >
-              <path d="m6 6 12 12M18 6 6 18" />
-            </svg>
-          </button>
-        </div>
-      </header>
+        }
+      >
+        <h2 id={titleId}>设置</h2>
+      </DialogHeader>
       <nav className="dpr-settings-nav" aria-label="设置分类">
         {sections.map(([id, label]) => (
           <button
@@ -110,7 +97,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </button>
         ))}
       </nav>
-      <div className="dpr-settings-body">
+      <div key={section} className="dpr-settings-body">
         {section === 'runtime' && <RuntimeSettings {...props} />}
         {section === 'reply' && <ReplySettings {...props} />}
         {section === 'account' && <AccountSettings {...props} />}
