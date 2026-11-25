@@ -544,7 +544,7 @@
   width: 17px;
   height: 17px;
   padding: 0;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 50%;
   background: transparent;
   color: var(--muted);
@@ -1759,7 +1759,9 @@
 }
 
 .dpr-chat-dialog-messages {
-  flex: 0 1 auto;
+  box-sizing: border-box;
+  height: 420px;
+  flex: 0 0 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
@@ -2373,7 +2375,6 @@
 .dpr-knowledge-preview-footer {
   padding: 10px 24px 18px;
 }
-.dpr-chat-dialog-messages,
 .dpr-knowledge-preview-body {
   flex: 1 1 auto;
 }

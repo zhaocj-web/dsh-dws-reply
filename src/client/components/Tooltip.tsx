@@ -80,7 +80,20 @@ export function Tooltip(props: TooltipProps) {
         onBlur={() => setFocused(false)}
         onClick={() => setDismissed(false)}
       >
-        ?
+        <svg
+          width="17"
+          height="17"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 11v6" />
+          <circle cx="12" cy="7.5" r="0.8" fill="currentColor" stroke="none" />
+        </svg>
       </button>
       {visible && (
         <span ref={tooltip} id={id} role="tooltip" className="dpr-form-tooltip">
