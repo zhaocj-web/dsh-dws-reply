@@ -1,4 +1,6 @@
+import type { PendingMessage, PendingStore } from './pending-store';
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { traceTool } from './tool-trace';
 import type { InternalChatParams } from './conversation-chat';
 import { createProcessingTrace } from './processing-trace';
@@ -23,6 +25,8 @@ import type {
 import { deliveryStatus, eligible, type DeliveryReceipt } from './dws/message-policy';
 export interface ProcessorDependencies {
   getConfig: () => ReplyConfig;
+  pendingStore?: PendingStore;
+  flushRecords?: () => Promise<void>;
   verifyOwnerSend?: () => Promise<void>;
   saveRules?: (params: ConversationRuleUpdate) => Promise<void>;
   getHistory?: (kind: 'direct' | 'group', target: string, conversationId?: string) => HistoryTurn[];
@@ -41,6 +45,8 @@ export interface ProcessorDependencies {
 /** 串行处理事件，在调用模型前持久化去重标识，防止重启后重复发送。 */
 export class Processor {
   private getConfig: ProcessorDependencies['getConfig'];
+  private pendingStore?: PendingStore;
+  private flushRecords?: () => Promise<void>;
   private saveRules: ProcessorDependencies['saveRules'];
   private getHistory: ProcessorDependencies['getHistory'];
   private activeReply?: { target: string; controller: AbortController };
@@ -54,10 +60,13 @@ export class Processor {
   private signal: AbortSignal;
   queue: Promise<void>;
   private pending: number;
+  private queued = new Map<string, Promise<void>>();
   private history: Map<string, HistoryTurn[]>;
   private last: Map<string, number>;
   constructor(params: ProcessorDependencies) {
     this.getConfig = params.getConfig;
+    this.pendingStore = params.pendingStore;
+    this.flushRecords = params.flushRecords;
     this.saveRules = params.saveRules;
     this.getHistory = params.getHistory;
     this.saveLedger = params.saveLedger;
@@ -72,12 +81,83 @@ export class Processor {
     this.history = new Map();
     this.last = new Map();
   }
-  accept(event: MessageEvent): Promise<void> {
-    if (this.pending >= 50 || this.signal.aborted) return Promise.resolve();
+  accept(event: MessageEvent, receivedAt = Date.now()): Promise<void> {
+    const target = eligible(event, this.getConfig(), receivedAt);
+    if (!target || this.signal.aborted || this.ledger[target.key]) return Promise.resolve();
+    const existing = this.queued.get(target.key);
+    if (existing) return existing;
+    if (!this.pendingStore && this.pending >= 50) {
+      this.report({
+        time: new Date(receivedAt).toISOString(),
+        kind: target.kind,
+        target: target.target,
+        sender: event.sender || target.target,
+        input: event.content,
+        conversationId: target.conversation,
+        status: 'error',
+        error: '待处理消息已达 50 条，本条未入队、未回复，请在会话中手动处理',
+      });
+      return Promise.resolve();
+    }
     this.pending++;
-    const task = this.queue.then(() => this.process(event));
-    this.queue = task.catch(() => {});
-    return task.finally(() => this.pending--);
+    // 立即排入磁盘写入队列，不等待前一条模型回复完成。
+    const persisted =
+      this.pendingStore?.add({ key: target.key, event, receivedAt }) ?? Promise.resolve();
+    void persisted.catch(() => {});
+    const task = this.queue.then(async () => {
+      await persisted;
+      await this.process(event, receivedAt, target.key);
+      const status = this.ledger[target.key]?.status;
+      if (
+        (status && ['delivered', 'draft', 'skipped', 'unknown'].includes(status)) ||
+        (status === 'cancelled' && !this.signal.aborted)
+      ) {
+        await this.flushRecords?.();
+        await this.pendingStore?.remove(target.key);
+      }
+    });
+    const settled = task.finally(() => {
+      this.pending--;
+      this.queued.delete(target.key);
+    });
+    this.queued.set(target.key, settled);
+    this.queue = settled.catch(() => {});
+    return settled;
+  }
+  /** 仅恢复有原始来信且明确未提交发送的任务；sending 永不猜测为失败重发。 */
+  async restore(onFailure: (error: unknown) => void): Promise<void> {
+    const recovered: PendingMessage[] = [];
+    for (const entry of this.pendingStore?.entries ?? []) {
+      if (this.signal.aborted) return;
+      const target = eligible(entry.event, this.getConfig(), entry.receivedAt);
+      if (!target || target.key !== entry.key) continue;
+      const status = this.ledger[entry.key]?.status;
+      if (status === 'sending') {
+        this.report({
+          time: new Date().toISOString(),
+          kind: target.kind,
+          target: target.target,
+          sender: entry.event.sender || target.target,
+          input: entry.event.content,
+          conversationId: target.conversation,
+          status: 'unknown',
+          error: '上次运行在提交发送后中断，投递结果未知，不会自动重发，请核实钉钉会话',
+        });
+        await this.flushRecords?.();
+        this.ledger[entry.key] = { time: Date.now(), status: 'unknown' };
+        await this.saveLedger(this.ledger);
+      }
+      if (status && !['processing', 'error', 'cancelled'].includes(status)) {
+        await this.pendingStore?.remove(entry.key);
+        continue;
+      }
+      delete this.ledger[entry.key];
+      recovered.push(entry);
+    }
+    await this.saveLedger(this.ledger);
+    for (const entry of recovered) {
+      void this.accept(entry.event, entry.receivedAt).catch(onFailure);
+    }
   }
   /** 内部交流与自动代答共用队列；取消仍在生成的同会话回复，但不撤回已提交的消息。 */
   chat(params: InternalChatParams): Promise<void> {
@@ -216,13 +296,20 @@ export class Processor {
     this.queue = task.catch(() => {});
     return task;
   }
-  private async process(event: MessageEvent): Promise<void> {
+  private async process(
+    event: MessageEvent,
+    receivedAt: number,
+    expectedKey: string,
+  ): Promise<void> {
     const config = this.getConfig();
-    const target = eligible(event, config);
-    if (!target || this.signal.aborted || this.ledger[target.key]) return;
+    // 时效以入队时间为准；执行时仍重新核验当前账号和名单。
+    const target = eligible(event, config, receivedAt);
+    if (!target || target.key !== expectedKey || this.signal.aborted || this.ledger[target.key])
+      return;
     const conversationScope = JSON.stringify([config.profile, target.kind, target.conversation]);
     const interventionKey = JSON.stringify([target.kind, target.target]);
     if (this.interventions.has(interventionKey)) {
+      this.ledger[target.key] = { time: Date.now(), status: 'skipped' };
       this.report({
         time: new Date().toISOString(),
         kind: target.kind,
@@ -232,10 +319,22 @@ export class Processor {
         status: 'skipped',
         error: '账号主人正在干预此会话，未自动回复',
       });
+      await this.flushRecords?.();
+      await this.saveLedger(this.ledger);
       return;
     }
-    if (Date.now() - (this.last.get(conversationScope) || 0) < config.cooldownSeconds * 1000)
-      return;
+    const waitMs =
+      config.cooldownSeconds * 1000 - (Date.now() - (this.last.get(conversationScope) || 0));
+    if (waitMs > 0) {
+      try {
+        await delay(waitMs, undefined, { signal: this.signal });
+      } catch (error) {
+        if (this.signal.aborted) return;
+        throw error;
+      }
+      const currentTarget = eligible(event, this.getConfig(), receivedAt);
+      if (currentTarget?.key !== expectedKey || this.interventions.has(interventionKey)) return;
+    }
     this.ledger[target.key] = { time: Date.now(), status: 'processing' };
     await this.saveLedger(this.ledger); // 先落盘再调用模型：磁盘失败时停止，避免重启后重复发送。
     this.last.set(conversationScope, Date.now());
@@ -256,6 +355,7 @@ export class Processor {
     this.activeReply = { target: interventionKey, controller: replyController };
     const trace = createProcessingTrace(history.length);
     trace.update({ steps: ['命中回复范围，已通过去重检查'] });
+    let attemptedSend = false;
     const report = (result: ProcessingRecord) => this.report({ ...result, trace: trace.finish() });
     try {
       const answer = (
@@ -287,10 +387,12 @@ export class Processor {
       if (answer.length > config.maxReplyChars) throw new Error('回复过长，已停止发送');
       let status: ReplyStatus = 'draft';
       if (config.mode === 'auto') {
-        if (!eligible(event, this.getConfig())) return;
+        if (eligible(event, this.getConfig(), receivedAt)?.key !== expectedKey) return;
         replySignal.throwIfAborted();
         this.ledger[target.key].status = 'sending';
         await this.saveLedger(this.ledger);
+        replySignal.throwIfAborted();
+        attemptedSend = true;
         trace.update({ steps: ['提交钉钉发送'] });
         const receipt = await traceTool({
           tool: 'DWS · chat +messages-send',
@@ -323,21 +425,28 @@ export class Processor {
       });
       report({ ...record, status, answer });
     } catch (error) {
-      const status = replySignal.aborted
-        ? 'cancelled'
-        : error instanceof UnsupportedMessageError
-          ? 'skipped'
-          : 'error';
-      this.ledger[target.key].status = status;
+      const status = attemptedSend
+        ? 'unknown'
+        : replySignal.aborted
+          ? 'cancelled'
+          : error instanceof UnsupportedMessageError
+            ? 'skipped'
+            : 'error';
+      // 主人主动干预属于终止任务，不能在下次恢复时再次自动回复。
+      this.ledger[target.key].status =
+        !attemptedSend && replyController.signal.aborted ? 'skipped' : status;
       report({
         ...record,
         status,
-        error: replyController.signal.aborted
-          ? '账号主人已干预，取消本次自动回复'
-          : errorMessage(error),
+        error: attemptedSend
+          ? `发送结果未知，不会自动重发：${errorMessage(error)}`
+          : replyController.signal.aborted
+            ? '账号主人已干预，取消本次自动回复'
+            : errorMessage(error),
       });
     } finally {
       this.activeReply = undefined;
+      await this.flushRecords?.();
       await this.saveLedger(this.ledger);
     }
   }

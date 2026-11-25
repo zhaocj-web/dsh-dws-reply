@@ -1,3 +1,4 @@
+import { createPendingStore } from './pending-store';
 import { applyInternalRules } from './internal-rule-update';
 import { queryKnowledge } from './dws/knowledge';
 import type { KnowledgeResult } from '../shared/knowledge';
@@ -10,6 +11,7 @@ import { listReplyModels } from './model-catalog';
 import { openConfigDirectory } from './open-config-directory';
 import { type ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { defaults, validate } from '../shared/config';
@@ -38,11 +40,12 @@ import { Processor } from './message-processor';
 import { createReplyGenerator } from './model';
 import { readJson, writeJsonAtomic } from './storage';
 export async function createRuntime(context: HostContext) {
-  const stateDirectory = join(
-    process.env.DSH_HOME || join(homedir(), '.dsh'),
-    'plugins',
-    'dws-personal-reply',
-  );
+  const pluginsDirectory = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'plugins');
+  const legacyDirectory = join(pluginsDirectory, 'dws-personal-reply');
+  // 已安装实例沿用原目录，保留配置、历史记录和实例锁，避免改名后重复监听。
+  const stateDirectory = existsSync(legacyDirectory)
+    ? legacyDirectory
+    : join(pluginsDirectory, 'dws-reply');
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const configPath = join(stateDirectory, 'config.json');
   let config = validate(await readJson(configPath, defaults));
@@ -79,8 +82,7 @@ export async function createRuntime(context: HostContext) {
     });
   };
   const saveLedger = async (value: Ledger) => {
-    const cutoff = Date.now() - 7 * 86400000;
-    for (const [k, v] of Object.entries(value)) if (v.time < cutoff) delete value[k];
+    // 队列可能跨多日恢复；保留发送账本，不能按时间淘汰后把旧任务重新发送。
     await writeJsonAtomic(join(stateDirectory, 'ledger.json'), value);
   };
   /** 先取消模型和监听，再等待处理队列结束，最后释放实例锁。 */
@@ -98,15 +100,22 @@ export async function createRuntime(context: HostContext) {
     );
     children = [];
     await processor?.queue;
-    await recordStore.flush();
-    processor = undefined;
-    if (lock) {
-      await lock.release();
-      lock = undefined;
+    try {
+      await recordStore.flush();
+      state.error = '';
+    } catch (error) {
+      state.error = '处理记录保存失败，请检查磁盘空间和配置目录权限';
+      throw error;
+    } finally {
+      // 保存失败也要完成停机，防止遗留实例锁阻止下次启动。
+      processor = undefined;
+      state.streams = {};
+      state.phase = 'disabled';
+      if (lock) {
+        await lock.release();
+        lock = undefined;
+      }
     }
-    state.streams = {};
-    state.phase = 'disabled';
-    state.error = '';
   }
   /** 任何监听失败都停止本实例，防止界面显示运行中但部分来源已失效。 */
   function fail(reason: string): void {
@@ -126,9 +135,19 @@ export async function createRuntime(context: HostContext) {
       state.accountDetails = identity.details;
       // 独占锁防止多个 DSH 配置同时代答，避免重复发送。
       lock = await acquireInstanceLock(join(stateDirectory, 'instance.lock'));
+      // 取得独占锁之后重新读取账本，避免另一实例退出前写入的发送状态被旧快照覆盖。
+      const latestLedger = await readJson<Ledger>(join(stateDirectory, 'ledger.json'), {});
+      for (const key of Object.keys(ledger)) delete ledger[key];
+      Object.assign(ledger, latestLedger);
+      const pendingStore = await createPendingStore({
+        directory: stateDirectory,
+        profile: config.profile,
+      });
       controller = new AbortController();
       const signal = controller.signal;
       processor = new Processor({
+        pendingStore,
+        flushRecords: () => recordStore.flush(),
         getConfig: () => config,
         saveRules,
         verifyOwnerSend,
@@ -148,6 +167,7 @@ export async function createRuntime(context: HostContext) {
         send: (replyConfig, target, text, signal) =>
           runDws<DeliveryReceipt>(sendArgs(replyConfig, target), { input: text, signal: signal }),
       });
+      await processor.restore(() => fail('恢复待处理消息失败，已停止；本地队列已保留'));
       const kinds: Array<'all-direct' | 'at-me'> = [];
       if (config.directPolicy !== 'off') kinds.push('all-direct');
       if (config.groupPolicy !== 'off') kinds.push('at-me');

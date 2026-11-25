@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 // 直接测试 TypeScript 源码，避免旧构建产物掩盖重构后的问题。
-const directory = 'node_modules/.cache/dws-personal-reply';
+const directory = 'node_modules/.cache/dws-reply';
 const testFile = `${directory}/core.test.mjs`;
 await mkdir(directory, { recursive: true });
 await build({

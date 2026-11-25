@@ -1,3 +1,4 @@
+import { createPendingStore } from '../src/host/pending-store.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaults, validate } from '../src/shared/config.ts';
@@ -74,10 +75,26 @@ test('concurrent duplicate events generate one draft and never send', async () =
       return '草稿';
     },
   });
-  await Promise.all([h.p.accept(event()), h.p.accept(event())]);
+  await Promise.all(Array.from({ length: 100 }, () => h.p.accept(event())));
   assert.equal(n, 1);
   assert.equal(h.sends.length, 0);
   assert.equal(h.records[0].status, 'draft');
+  assert.equal(h.records.length, 1);
+  const queued = harness(
+    { ...config(), mode: 'auto', maxAgeSeconds: 0.02, cooldownSeconds: 0.08 },
+    {
+      generate: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return '排队后的回复';
+      },
+    },
+  );
+  await Promise.all([
+    queued.p.accept(event({ message_id: 'queued-1' })),
+    queued.p.accept(event({ message_id: 'queued-2' })),
+  ]);
+  assert.equal(queued.sends.length, 2);
+  assert.equal(queued.records.length, 2);
 });
 test('restart ledger suppresses already handled events', async () => {
   const h = harness();
@@ -92,6 +109,74 @@ test('restart ledger suppresses already handled events', async () => {
   });
   await h2.p.accept(event());
   assert.equal(n, 0);
+  const directory = await mkdtemp(join(tmpdir(), 'dpr-pending-'));
+  try {
+    const c = { ...config(), mode: 'auto' };
+    const params = { directory, profile: c.profile };
+    let store = await createPendingStore(params);
+    const message = event({ message_id: 'interrupted' });
+    const key = eligible(message, c).key;
+    let release;
+    const interrupted = harness(c, {
+      pendingStore: store,
+      generate: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    const task = interrupted.p.accept(message);
+    while (!release) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await createPendingStore(params)).entries.length, 1);
+    interrupted.ctl.abort();
+    release('未发送的回复');
+    await task;
+    assert.equal(interrupted.sends.length, 0);
+    assert.equal(store.entries.length, 1);
+    store = await createPendingStore(params);
+    const resumed = harness(c, {
+      pendingStore: store,
+      ledger: structuredClone(interrupted.ledger),
+    });
+    await resumed.p.restore((error) => {
+      throw error;
+    });
+    await resumed.p.queue;
+    assert.equal(resumed.sends.length, 1);
+    assert.equal((await createPendingStore(params)).entries.length, 0);
+    await resumed.p.accept(message);
+    assert.equal(resumed.sends.length, 1);
+
+    // 发送已提交的任务即使仍在收件队列，也只能恢复为未知状态。
+    await store.add({ key, event: message, receivedAt: Date.now() });
+    const uncertain = harness(c, {
+      pendingStore: store,
+      ledger: { [key]: { time: Date.now(), status: 'sending' } },
+    });
+    await uncertain.p.restore((error) => {
+      throw error;
+    });
+    await uncertain.p.queue;
+    assert.equal(uncertain.sends.length, 0);
+    assert.equal(uncertain.records[0].status, 'unknown');
+    assert.equal(store.entries.length, 0);
+
+    // 重启前已接收的旧消息保留接收时间；恢复超过 50 条也不丢弃。
+    const receivedAt = Date.now() - 86400000;
+    for (let index = 0; index < 55; index++) {
+      const queued = event({ message_id: `backlog-${index}`, event_time: receivedAt });
+      await store.add({ key: eligible(queued, c, receivedAt).key, event: queued, receivedAt });
+    }
+    const backlog = harness(c, { pendingStore: await createPendingStore(params) });
+    await backlog.p.restore((error) => {
+      throw error;
+    });
+    await backlog.p.queue;
+    assert.equal(backlog.sends.length, 55);
+    assert.equal((await createPendingStore(params)).entries.length, 0);
+    assert.equal((await createPendingStore({ directory, profile: 'other' })).entries.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 test('stop during generation prevents send', async () => {
   let release;
@@ -110,6 +195,24 @@ test('unknown delivery is not success and not retried', async () => {
   await h.p.accept(event());
   assert.equal(h.records.length, 1);
   assert.equal(h.records[0].status, 'unknown');
+  let attempts = 0;
+  const failed = harness(
+    { ...config(), mode: 'auto' },
+    {
+      send: async () => {
+        attempts++;
+        throw new Error('delivery timeout');
+      },
+    },
+  );
+  await failed.p.accept(event());
+  await failed.p.accept(event());
+  assert.equal(attempts, 1);
+  assert.equal(failed.records[0].status, 'unknown');
+  assert.match(failed.records[0].error, /不会自动重发/);
+  const restarted = harness({ ...config(), mode: 'auto' }, { ledger: failed.ledger });
+  await restarted.p.accept(event());
+  assert.equal(restarted.sends.length, 0);
 });
 test('failed durable claim prevents any model or send call', async () => {
   let n = 0;
@@ -307,7 +410,7 @@ test('saved contact profiles survive round trips and removed contacts lose cache
   assert.throws(() => validate({ ...config(), contactProfiles: null }));
 });
 
-import { mkdtemp, readFile, writeFile, unlink, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, unlink, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -809,7 +912,7 @@ test('records survive restart, serialize concurrent writes and stay isolated by 
   try {
     const params = { directory, profile: 'account-one' };
     const store = await createRecordStore(params);
-    const writes = Array.from({ length: 35 }, (_, index) =>
+    const writes = Array.from({ length: 105 }, (_, index) =>
       store.append({
         time: new Date(index * 1000).toISOString(),
         kind: 'direct',
@@ -822,11 +925,30 @@ test('records survive restart, serialize concurrent writes and stay isolated by 
     await Promise.all(writes);
     await store.flush();
     const restored = await createRecordStore(params);
-    assert.equal(restored.records.length, 30);
-    assert.equal(restored.records[0].answer, 'reply-34');
-    assert.equal(restored.records[29].answer, 'reply-5');
+    assert.equal(restored.records.length, 100);
+    assert.equal(restored.records[0].answer, 'reply-104');
+    assert.equal(restored.records[99].answer, 'reply-5');
+    await restored.append({
+      time: new Date().toISOString(),
+      kind: 'group',
+      target: 'friend',
+      sender: 'friend',
+      status: 'draft',
+      answer: 'group-reply',
+    });
+    const withGroup = await createRecordStore(params);
+    assert.equal(withGroup.records.length, 101);
+    assert.equal(withGroup.records.filter((record) => record.kind === 'direct').length, 100);
     const other = await createRecordStore({ directory, profile: 'account-two' });
     assert.deepEqual(other.records, []);
+    await rm(directory, { recursive: true });
+    await assert.rejects(withGroup.append(withGroup.records[0]));
+    await assert.rejects(withGroup.flush());
+    await mkdir(directory);
+    await withGroup.append(withGroup.records[0]);
+    await withGroup.flush();
+    const recovered = await createRecordStore(params);
+    assert.equal(recovered.records[0].answer, 'group-reply');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

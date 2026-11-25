@@ -20,7 +20,7 @@ const client = await build({
   external: ['react'],
   loader: { '.css': 'text' },
   banner: {
-    js: 'window.__ModuleLoader__.load({id:"dsh-dws-personal-reply",factory:(require)=>{var module={exports:{}};var exports=module.exports;',
+    js: 'window.__ModuleLoader__.load({id:"dsh-dws-reply",factory:(require)=>{var module={exports:{}};var exports=module.exports;',
   },
   footer: { js: 'return module.exports;}});' },
 });
