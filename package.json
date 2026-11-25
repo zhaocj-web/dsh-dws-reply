@@ -1,0 +1,51 @@
+{
+  "name": "dsh-dws-personal-reply",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "钉钉个人代答：DWS 个人消息接入与 DSH 模型回复",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write src scripts test package.json tsconfig.json .prettierrc.json",
+    "format:check": "prettier --check src scripts test package.json tsconfig.json .prettierrc.json",
+    "test": "node scripts/test.mjs",
+    "check": "npm run typecheck && npm run format:check && npm test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^18.3.31",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.10.1",
+    "typescript": "^5.9.3"
+  }
+}

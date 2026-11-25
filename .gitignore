@@ -1,0 +1,14 @@
+node_modules/
+lib/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+.dsh/
+.dws/
+config.json
+ledger.json
+records-*.json
+instance.lock
