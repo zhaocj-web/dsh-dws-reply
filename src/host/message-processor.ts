@@ -1,3 +1,4 @@
+import { MessagePreparationError } from './dws/send-message';
 import type { PendingMessage, PendingStore } from './pending-store';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -40,6 +41,7 @@ export interface ProcessorDependencies {
     signal: AbortSignal,
   ) => Promise<DeliveryReceipt>;
   report: (record: ProcessingRecord) => void;
+  progress?: (record: ProcessingRecord, active: boolean) => void;
   signal: AbortSignal;
 }
 /** 串行处理事件，在调用模型前持久化去重标识，防止重启后重复发送。 */
@@ -57,12 +59,19 @@ export class Processor {
   private send: ProcessorDependencies['send'];
   private verifyOwnerSend: ProcessorDependencies['verifyOwnerSend'];
   private report: ProcessorDependencies['report'];
+  private progress: ProcessorDependencies['progress'];
   private signal: AbortSignal;
   queue: Promise<void>;
   private pending: number;
   private queued = new Map<string, Promise<void>>();
   private history: Map<string, HistoryTurn[]>;
   private last: Map<string, number>;
+  /** 主人确认发送与自动回复共用队列，避免发送账本的并发写入。 */
+  runExclusive(task: () => Promise<void>): Promise<void> {
+    const work = this.queue.then(task);
+    this.queue = work.catch(() => {});
+    return work;
+  }
   constructor(params: ProcessorDependencies) {
     this.getConfig = params.getConfig;
     this.pendingStore = params.pendingStore;
@@ -75,6 +84,7 @@ export class Processor {
     this.send = params.send;
     this.verifyOwnerSend = params.verifyOwnerSend;
     this.report = params.report;
+    this.progress = params.progress;
     this.signal = params.signal;
     this.queue = Promise.resolve();
     this.pending = 0;
@@ -167,8 +177,6 @@ export class Processor {
     const task = this.queue.then(async () => {
       const config = this.getConfig();
       const history = this.getHistory?.(params.kind, params.target, params.conversationId) ?? [];
-      const trace = createProcessingTrace(history.length);
-      trace.update({ steps: ['账号主人内部交流，不发送给联系人'] });
       const record = {
         time: new Date().toISOString(),
         kind: params.kind,
@@ -179,6 +187,19 @@ export class Processor {
         conversationId: params.conversationId,
         requestId: params.requestId,
       };
+      const trace = createProcessingTrace(history.length, (update) =>
+        this.progress?.(
+          {
+            ...record,
+            status: 'draft',
+            inProgress: true,
+            trace: update,
+            answer: update.partialAnswer,
+          },
+          true,
+        ),
+      );
+      trace.update({ steps: ['账号主人内部交流，正在准备回复'] });
       const target = {
         kind: params.kind,
         target: params.target,
@@ -280,6 +301,11 @@ export class Processor {
           trace: trace.finish(),
         });
       } catch (error) {
+        if (error instanceof MessagePreparationError) {
+          attemptedSend = false;
+          delete this.ledger[sendKey];
+          await this.saveLedger(this.ledger);
+        }
         this.report({
           ...record,
           status: attemptedSend ? 'unknown' : this.signal.aborted ? 'cancelled' : 'error',
@@ -290,6 +316,7 @@ export class Processor {
           trace: trace.finish(),
         });
       } finally {
+        this.progress?.({ ...record, status: 'draft' }, false);
         this.interventions.delete(key);
       }
     });
@@ -345,6 +372,8 @@ export class Processor {
       target: target.target,
       input: event.content,
       conversationId: target.conversation,
+      messageId: event.message_id,
+      senderId: event.sender_open_dingtalk_id,
     };
     const history =
       this.getHistory?.(target.kind, target.target, target.conversation) ??
@@ -353,7 +382,18 @@ export class Processor {
     const replyController = new AbortController();
     const replySignal = AbortSignal.any([this.signal, replyController.signal]);
     this.activeReply = { target: interventionKey, controller: replyController };
-    const trace = createProcessingTrace(history.length);
+    const trace = createProcessingTrace(history.length, (update) =>
+      this.progress?.(
+        {
+          ...record,
+          status: 'draft',
+          inProgress: true,
+          trace: update,
+          answer: update.partialAnswer,
+        },
+        true,
+      ),
+    );
     trace.update({ steps: ['命中回复范围，已通过去重检查'] });
     let attemptedSend = false;
     const report = (result: ProcessingRecord) => this.report({ ...result, trace: trace.finish() });
@@ -425,6 +465,7 @@ export class Processor {
       });
       report({ ...record, status, answer });
     } catch (error) {
+      if (error instanceof MessagePreparationError) attemptedSend = false;
       const status = attemptedSend
         ? 'unknown'
         : replySignal.aborted
@@ -445,6 +486,7 @@ export class Processor {
             : errorMessage(error),
       });
     } finally {
+      this.progress?.({ ...record, status: 'draft' }, false);
       this.activeReply = undefined;
       await this.flushRecords?.();
       await this.saveLedger(this.ledger);

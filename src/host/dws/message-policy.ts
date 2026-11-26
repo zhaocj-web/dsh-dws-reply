@@ -51,7 +51,8 @@ export function eligible(
       .digest('hex'),
   };
 }
-export function sendArgs(config: ReplyConfig, target: ReplyTarget): string[] {
+/** 发送准备后的 Markdown 正文，图片路径由 sendMessage 在隔离目录中生成。 */
+export function sendArgs(config: ReplyConfig, target: ReplyTarget, text: string): string[] {
   return [
     'chat',
     '+messages-send',
@@ -61,7 +62,7 @@ export function sendArgs(config: ReplyConfig, target: ReplyTarget): string[] {
     'user',
     target.kind === 'direct' ? '--open-dingtalk-id' : '--group',
     target.target,
-    '--text',
+    '--markdown',
     '-',
     '--body-stdin',
     '--idempotency-key',

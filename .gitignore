@@ -13,3 +13,4 @@ ledger.json
 records-*.json
 instance.lock
 pending-*.json
+message-images/

@@ -3,12 +3,12 @@ import React from 'react';
 import { ToolCallList } from './ToolCallList';
 import type { ProcessingTrace } from '../../shared/types';
 
-type RecordTraceProps = { trace?: ProcessingTrace };
+type RecordTraceProps = { trace?: ProcessingTrace; active?: boolean };
 
 export function RecordTrace(props: RecordTraceProps) {
   const trace = props.trace;
   return (
-    <details className="dpr-record-trace">
+    <details className="dpr-record-trace" open={props.active || undefined}>
       <summary>思考过程{trace ? ` · ${(trace.durationMs / 1000).toFixed(1)} 秒` : ''}</summary>
       {trace ? (
         <div className="dpr-record-trace-body">
@@ -64,7 +64,10 @@ export function RecordTrace(props: RecordTraceProps) {
           )}
           <div className="dpr-model-reasoning">
             {trace.reasoning && <CopyButton text={trace.reasoning} label="复制推理内容" />}
-            <p>{trace.reasoning || '本次模型未返回推理内容。'}</p>
+            <p>
+              {trace.reasoning ||
+                (props.active ? '等待模型返回推理内容…' : '本次模型未返回推理内容。')}
+            </p>
             {trace.reasoningTruncated && (
               <p className="dpr-help">内容较长，仅保留前 32000 字符。</p>
             )}

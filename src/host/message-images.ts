@@ -1,3 +1,4 @@
+import { cacheMessageImages } from './image-cache';
 import { traceTool } from './tool-trace';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
@@ -26,6 +27,7 @@ type MessageDetails = {
 };
 type ImageResourcesParams = { details: MessageDetails; event: MessageEvent };
 type LoadMessageImagesParams = {
+  previewOnly?: boolean;
   onTrace?: (update: Partial<ProcessingTrace>) => void;
   event: MessageEvent;
   profile: string;
@@ -119,7 +121,7 @@ export async function loadMessageImages(params: LoadMessageImagesParams): Promis
   );
   const resources = selectImageResources({ details, event: params.event });
   if (!resources.length) return [];
-  if (!(await params.supportsImages()))
+  if (!params.previewOnly && !(await params.supportsImages()))
     throw new UnsupportedMessageError('当前回复模型不支持图片，请选择支持视觉的模型');
   const directory = await mkdtemp(join(params.directory, 'image-'));
   try {
@@ -171,6 +173,13 @@ export async function loadMessageImages(params: LoadMessageImagesParams): Promis
       inputs.push({ data, mediaType: imageMediaType(data), name: `钉钉图片-${inputs.length + 1}` });
     }
     params.signal.throwIfAborted();
+    await cacheMessageImages({
+      directory: params.directory,
+      profile: params.profile,
+      messageId: params.event.message_id!,
+      images: inputs,
+    });
+    if (params.previewOnly) return [];
     const refs = await traceTool({
       tool: 'DSH · attachments.saveImages',
       purpose: '校验图片并创建模型附件',

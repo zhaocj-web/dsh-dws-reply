@@ -1,3 +1,8 @@
+import { sendDraft } from './send-draft';
+import { sendMessage } from './dws/send-message';
+import { readMessageImages } from './image-cache';
+import { loadMessageImages } from './message-images';
+import type { MessageImagesResult } from '../shared/types';
 import { createPendingStore } from './pending-store';
 import { applyInternalRules } from './internal-rule-update';
 import { queryKnowledge } from './dws/knowledge';
@@ -33,7 +38,6 @@ import { resolveAccount } from './dws/account';
 import { runDws } from './dws/command';
 import { searchGroups } from './dws/groups';
 import { searchContacts } from './dws/contacts';
-import { sendArgs, type DeliveryReceipt } from './dws/message-policy';
 import { startSubscription } from './dws/subscription';
 import { acquireInstanceLock, type InstanceLock } from './instance-lock';
 import { Processor } from './message-processor';
@@ -70,11 +74,20 @@ export async function createRuntime(context: HostContext) {
     phase: 'disabled',
     streams: {},
     records: recordStore.records,
+    activeRecords: [],
     error: '',
     account: '',
   };
   const snapshot = (): PluginSnapshot => ({ config, state, configPath });
+  const progress = (record: ProcessingRecord, active: boolean) => {
+    const others = (state.activeRecords ?? []).filter(
+      (item) =>
+        !(item.time === record.time && item.kind === record.kind && item.target === record.target),
+    );
+    state.activeRecords = active ? [record, ...others] : others;
+  };
   const report = (record: ProcessingRecord) => {
+    progress(record, false);
     const saved = recordStore.append(record);
     state.records = recordStore.records;
     void saved.catch(() => {
@@ -163,9 +176,10 @@ export async function createRuntime(context: HostContext) {
         saveLedger,
         signal,
         report,
+        progress,
         generate,
         send: (replyConfig, target, text, signal) =>
-          runDws<DeliveryReceipt>(sendArgs(replyConfig, target), { input: text, signal: signal }),
+          sendMessage({ config: replyConfig, target, text, signal }),
       });
       await processor.restore(() => fail('恢复待处理消息失败，已停止；本地队列已保留'));
       const kinds: Array<'all-direct' | 'at-me'> = [];
@@ -210,12 +224,76 @@ export async function createRuntime(context: HostContext) {
     | ModelCatalog
     | DirectoryResult
     | KnowledgeResult
+    | MessageImagesResult
   > {
+    if (endpoint === 'messageImages') {
+      if (!payload || typeof payload !== 'object') throw new Error('图片请求无效');
+      const request = payload as Record<string, unknown>;
+      const record = recordStore.records.find(
+        (item) =>
+          item.kind === request.kind &&
+          item.target === request.target &&
+          item.time === request.time &&
+          item.origin !== 'owner',
+      );
+      if (!record?.messageId || !record.senderId || !record.conversationId)
+        throw new Error('这条历史记录没有保存图片来源，暂时无法显示');
+      const params = {
+        directory: stateDirectory,
+        profile: config.profile,
+        messageId: record.messageId,
+      };
+      const cached = await readMessageImages(params);
+      if (cached) return cached;
+      await loadMessageImages({
+        ...params,
+        previewOnly: true,
+        event: {
+          message_id: record.messageId,
+          conversation_id: record.conversationId,
+          sender_open_dingtalk_id: record.senderId,
+        },
+        signal: AbortSignal.timeout(90000),
+        supportsImages: async () => true,
+        attachments: context.attachments,
+      });
+      return (await readMessageImages(params)) ?? { images: [] };
+    }
     if (endpoint === 'knowledge') return queryKnowledge({ profile: config.profile, payload });
     if (endpoint === 'listContacts') return listContacts(config.profile, payload);
     if (endpoint === 'listGroups') return listGroups(config.profile, payload);
     if (endpoint === 'listModels') return listReplyModels(context);
     if (endpoint === 'get') return snapshot();
+    if (endpoint === 'sendDraft') {
+      const execute = () =>
+        sendDraft({
+          request: payload,
+          config,
+          records: recordStore.records,
+          ledger,
+          saveLedger: () => saveLedger(ledger),
+          verifyAccount: verifyOwnerSend,
+          saveRecord: async (record) => {
+            await recordStore.update(record);
+            state.records = recordStore.records;
+          },
+          send: (target, text) =>
+            sendMessage({ config, target, text, signal: AbortSignal.timeout(90000) }),
+        });
+      if (processor && !controller?.signal.aborted) await processor.runExclusive(execute);
+      else {
+        const temporaryLock = await acquireInstanceLock(join(stateDirectory, 'instance.lock'));
+        try {
+          const saved = await readJson<Ledger>(join(stateDirectory, 'ledger.json'), {});
+          for (const key of Object.keys(ledger)) delete ledger[key];
+          Object.assign(ledger, saved);
+          await execute();
+        } finally {
+          await temporaryLock.release();
+        }
+      }
+      return snapshot();
+    }
     if (endpoint === 'internalChat') {
       const params = validateInternalChat(payload);
       if (!config.profile) throw new Error('请先关联钉钉账号');
@@ -245,9 +323,10 @@ export async function createRuntime(context: HostContext) {
           ledger,
           generate,
           report,
+          progress,
           signal: AbortSignal.timeout(120000),
           send: (replyConfig, target, text, signal) =>
-            runDws<DeliveryReceipt>(sendArgs(replyConfig, target), { input: text, signal }),
+            sendMessage({ config: replyConfig, target, text, signal }),
         });
       await worker.chat({
         ...params,

@@ -1,3 +1,4 @@
+import type { MessageImagesResult } from '../shared/types';
 import type { KnowledgeResult } from '../shared/knowledge';
 import type { DirectoryResult } from '../shared/types';
 import { errorMessage } from '../shared/errors';
@@ -21,10 +22,13 @@ interface Runtime {
     | ModelCatalog
     | DirectoryResult
     | KnowledgeResult
+    | MessageImagesResult
   >;
   dispose(): Promise<void>;
 }
 const endpoints: Endpoint[] = [
+  'sendDraft',
+  'messageImages',
   'knowledge',
   'listContacts',
   'listGroups',
@@ -79,6 +83,7 @@ export function registerRpc(context: HostContext, runtime: Runtime): void {
             | ModelCatalog
             | DirectoryResult
             | KnowledgeResult
+            | MessageImagesResult
           >;
           try {
             const execute = () => runtime.dispatch(endpoint, body.payload);

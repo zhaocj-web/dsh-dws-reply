@@ -1,6 +1,10 @@
+import type { WebSearchService } from './web-search';
+import type { SkillRegistry } from './skills';
 import type { GenerateOptions, StreamChunk, ImageBlock } from '@deepseek-ai/dsh-llm';
 /** 插件使用的宿主服务子集。实现由 DSH 注入，不在插件内重新创建。 */
 export interface HostContext {
+  skills?: SkillRegistry;
+  web?: WebSearchService;
   attachments: {
     saveImages(
       inputs: ReadonlyArray<{

@@ -1,4 +1,4 @@
-# DSH · 钉钉个人代答
+# DSH · 钉钉代答
 
 基于 DeepSeek Harness 和 DWS 的个人钉钉代答插件，使用 TypeScript / React 开发。
 

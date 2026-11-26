@@ -48,6 +48,19 @@ export async function createRecordStore(params: RecordStoreParams) {
       pending = task.catch(() => {});
       return task;
     },
+    update(record: ProcessingRecord): Promise<void> {
+      const index = records.findIndex(
+        (item) =>
+          item.time === record.time && item.kind === record.kind && item.target === record.target,
+      );
+      if (index < 0) return Promise.reject(new Error('原记录已不存在'));
+      records = records.map((item, position) => (position === index ? record : item));
+      const snapshot = [...records];
+      const task = pending.then(() => writeJsonAtomic(path, snapshot));
+      latestWrite = task;
+      pending = task.catch(() => {});
+      return task;
+    },
     flush: () => latestWrite,
   };
 }

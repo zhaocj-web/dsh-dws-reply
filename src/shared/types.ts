@@ -61,14 +61,16 @@ export interface HistoryTurn {
   assistant: string;
 }
 export type ToolCallRecord = {
+  id?: string;
   tool: string;
   purpose: string;
   time: string;
   durationMs: number;
-  status: 'success' | 'failed' | 'cancelled';
+  status: 'running' | 'success' | 'failed' | 'cancelled';
   result: string;
 };
 export type ProcessingTrace = {
+  partialAnswer?: string;
   ruleChange?: { before: string; after: string };
   knowledgeReferences?: KnowledgeReference[];
   toolCalls?: ToolCallRecord[];
@@ -80,7 +82,11 @@ export type ProcessingTrace = {
   reasoning?: string;
   reasoningTruncated?: boolean;
 };
+export type MessageImagesResult = { images: Array<{ id: string; dataUrl: string }> };
 export interface ProcessingRecord {
+  inProgress?: boolean;
+  messageId?: string;
+  senderId?: string;
   sentText?: string;
   conversationId?: string;
   origin?: 'owner' | 'incoming';
@@ -112,6 +118,7 @@ export interface RuntimeState {
   phase: RuntimePhase;
   streams: Record<string, 'connecting' | 'ready' | 'stopped'>;
   records: ProcessingRecord[];
+  activeRecords?: ProcessingRecord[];
   error: string;
   account: string;
   accountDetails?: AccountDetails;
@@ -136,6 +143,8 @@ export interface ContactSearchResult {
   omitted: number;
 }
 export interface RpcRequests {
+  sendDraft: { kind: ConversationKind; target: string; time: string };
+  messageImages: { kind: ConversationKind; target: string; time: string };
   knowledge: KnowledgeRequest;
   internalChat: { kind: ConversationKind; target: string; text: string; requestId: string };
   listContacts: { cursor?: string };

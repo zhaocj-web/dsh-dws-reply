@@ -1,3 +1,6 @@
+import { selectAvailableReplyModel } from '../src/host/model-catalog.ts';
+import { messageContent } from '../src/client/domain/message-content.ts';
+import { readMessageImages } from '../src/host/image-cache.ts';
 import { createPendingStore } from '../src/host/pending-store.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -60,12 +63,21 @@ test('scope rejects self, old events, missing IDs, unapproved senders and unknow
 test('group mention sends to group, direct sends to person; argv keeps content out of shell', () => {
   const c = config();
   const g = eligible(event({ type: 'user_im_message_receive_at', conversation_id: 'group' }), c);
-  const ga = sendArgs(c, g);
+  const ga = sendArgs(c, g, '## 群聊回复\n**重点**');
   assert.ok(ga.includes('--group'));
   assert.ok(!ga.includes('--open-dingtalk-id'));
-  const da = sendArgs(c, eligible(event(), c));
+  const da = sendArgs(c, eligible(event(), c), '## 私聊回复\n- 第一项');
   assert.ok(da.includes('--open-dingtalk-id'));
   assert.ok(da.includes('--body-stdin'));
+  assert.ok(ga.includes('--markdown'));
+  assert.ok(da.includes('--markdown'));
+  assert.ok(!da.includes('--text'));
+  assert.equal(da[da.indexOf('--markdown') + 1], '-');
+  assert.ok(da.includes('--idempotency-key'));
+  assert.ok(da.includes('--wait-delivery'));
+  const imageArgs = sendArgs(c, eligible(event(), c), '![附件](./config.json)');
+  assert.ok(imageArgs.includes('--markdown'));
+  assert.ok(!imageArgs.includes('--text'));
 });
 test('concurrent duplicate events generate one draft and never send', async () => {
   let n = 0;
@@ -1078,6 +1090,28 @@ test('image files are admitted with their verified format and temporary download
     assert.equal(images[0].type, 'image');
     assert.equal(images[0].attachment.attachmentId, 'stored');
     await assert.rejects(stat(downloaded), { code: 'ENOENT' });
+    const cached = await readMessageImages({
+      directory,
+      profile: 'test',
+      messageId: message.message_id,
+    });
+    assert.equal(cached.images.length, 1);
+    assert.equal(cached.images[0].dataUrl, 'data:image/gif;base64,R0lGODlh');
+    assert.equal(
+      await readMessageImages({ directory, profile: 'other', messageId: message.message_id }),
+      null,
+    );
+    const input =
+      '请看这张图\n[图片消息](mediaId=abc) 注意：如需下载使用dws chat message download-media命令下载\n这是用户补充';
+    assert.deepEqual(messageContent(input), {
+      text: '请看这张图\n\n这是用户补充',
+      hasImages: true,
+    });
+    assert.deepEqual(messageContent('普通文字，不包含图片'), {
+      text: '普通文字，不包含图片',
+      hasImages: false,
+    });
+    assert.equal(messageContent('[图片消息]\\(mediaId=abc)').text, '');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1096,10 +1130,55 @@ test('unsupported image replies are recorded as skipped and never sent', async (
   assert.equal(received, message);
   assert.equal(h.sends.length, 0);
   assert.equal(h.records[0].status, 'skipped');
+  assert.equal(h.records[0].messageId, message.message_id);
+  assert.equal(h.records[0].senderId, message.sender_open_dingtalk_id);
   assert.match(h.records[0].error, /不支持图片/);
 });
 
 test('model catalog marks vision models explicitly', async () => {
+  const context = {
+    llm: {
+      listProviders: () => [{ id: 'p', name: 'P' }],
+      listModels: async () => [{ id: 'available', name: 'Available', inputModalities: ['text'] }],
+    },
+  };
+  const stale = { provider: 'p', model: 'removed' };
+  await assert.rejects(
+    selectAvailableReplyModel({ context, selected: null, defaultModel: stale }),
+    /默认模型不在/,
+  );
+  await assert.rejects(selectAvailableReplyModel({ context, selected: stale }), /所选回复模型不在/);
+  await assert.rejects(
+    selectAvailableReplyModel({ context, selected: { provider: 'removed', model: 'm' } }),
+    /供应商不存在/,
+  );
+  assert.deepEqual(
+    await selectAvailableReplyModel({ context, selected: smartReplyModel, defaultModel: stale }),
+    { provider: 'p', model: 'available' },
+  );
+  assert.deepEqual(
+    await selectAvailableReplyModel({
+      context,
+      selected: null,
+      defaultModel: { provider: 'p', model: 'available' },
+    }),
+    { provider: 'p', model: 'available' },
+  );
+  await assert.rejects(
+    selectAvailableReplyModel({
+      context: {
+        llm: {
+          ...context.llm,
+          listModels: async () => {
+            throw new Error('network');
+          },
+        },
+      },
+      selected: stale,
+    }),
+    /加载失败/,
+  );
+
   const catalog = await listReplyModels({
     llm: {
       listProviders: () => [{ id: 'p', name: 'P' }],
@@ -1370,7 +1449,7 @@ test('tool traces record actual outcomes without raw payloads or errors', async 
     result.toolCalls.map((call) => call.status),
     ['success', 'failed', 'cancelled'],
   );
-  assert.equal(result.steps[0], '完成');
+  assert.equal(result.steps.at(-1), '完成');
   assert.ok(result.toolCalls.every((call) => call.durationMs >= 0 && Date.parse(call.time)));
   assert.ok(!JSON.stringify(result).includes('private-token'));
   assert.ok(!JSON.stringify(result).includes('/private/path'));
@@ -1927,4 +2006,563 @@ test('internal format retry does not swallow cancellation', async () => {
       },
     }),
   );
+});
+
+test('技能按需加载并限制参考资料范围，禁用技能和未知工具不可调用', async () => {
+  const { createSkillTools } = await import('../src/host/skills.ts');
+  const { mkdtemp, writeFile, mkdir, symlink, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'reply-skills-'));
+  try {
+    const base = join(root, 'skill');
+    await mkdir(base);
+    await writeFile(join(base, 'reference.md'), '回复要简洁');
+    await writeFile(join(root, 'outside.md'), '不能读取');
+    await symlink(join(root, 'outside.md'), join(base, 'linked.md'));
+    await writeFile(join(base, 'large.md'), 'x'.repeat(64001));
+    const skill = {
+      name: 'reply-style',
+      description: '回复风格',
+      content: '读取 reference.md 后拟稿',
+      invocation: { modelInvocable: true, userInvocable: true },
+      resourceBase: { kind: 'directory', path: base },
+    };
+    let available = true;
+    const controller = new AbortController();
+    const traces = [];
+    const tools = await createSkillTools({
+      context: {
+        skills: {
+          list: async () => [
+            skill,
+            { ...skill, name: 'disabled', invocation: { modelInvocable: false } },
+          ],
+          get: async () => (available ? skill : undefined),
+        },
+      },
+      signal: controller.signal,
+      onTrace: (trace) => traces.push(trace),
+    });
+    const call = (name, args) =>
+      tools.execute({ type: 'tool-call', id: 'test', name, arguments: JSON.stringify(args) });
+    assert.equal(tools.tools.length, 2);
+    assert.ok(!tools.prompt.includes('disabled'));
+    await assert.rejects(
+      call('skill_resource', { name: skill.name, path: 'reference.md' }),
+      /先加载/,
+    );
+    await assert.rejects(call('skill', { name: 'disabled' }), /不允许/);
+    await assert.rejects(call('bash', { name: skill.name }), /工具不可用/);
+    assert.equal(JSON.parse(await call('skill', { name: skill.name })).content, skill.content);
+    assert.equal(
+      await call('skill_resource', { name: skill.name, path: 'reference.md' }),
+      '回复要简洁',
+    );
+    await assert.rejects(
+      call('skill_resource', { name: skill.name, path: '../outside.md' }),
+      /不在技能目录/,
+    );
+    await assert.rejects(
+      call('skill_resource', { name: skill.name, path: 'linked.md' }),
+      /不在技能目录/,
+    );
+    await assert.rejects(call('skill_resource', { name: skill.name, path: 'large.md' }), /过大/);
+    available = false;
+    await assert.rejects(call('skill', { name: skill.name }), /不可用/);
+    controller.abort();
+    await assert.rejects(call('skill', { name: skill.name }));
+    assert.ok(traces.some((trace) => trace.toolCalls[0].result.includes('reply-style')));
+    assert.ok(traces.some((trace) => trace.toolCalls[0].status === 'failed'));
+    assert.equal(traces.at(-1).toolCalls[0].status, 'cancelled');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('宿主没有技能服务时不声明不存在的工具', async () => {
+  const { createSkillTools } = await import('../src/host/skills.ts');
+  const tools = await createSkillTools({ context: {}, signal: new AbortController().signal });
+  assert.deepEqual(tools.tools, []);
+  assert.match(tools.prompt, /没有可供模型调用的技能/);
+});
+
+test('技能循环保留工具结果，拒绝截断、超限与取消后的执行', async () => {
+  const { build } = await import('esbuild');
+  const bundled = await build({
+    entryPoints: ['src/host/skill-model-loop.ts'],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    plugins: [
+      {
+        name: 'test-llm-contract',
+        setup(builder) {
+          builder.onResolve({ filter: /^@deepseek-ai\/dsh-llm$/ }, () => ({
+            path: 'llm',
+            namespace: 'test',
+          }));
+          builder.onLoad({ filter: /.*/, namespace: 'test' }, () => ({
+            contents: `
+        export class BlockAssembler {
+          data = []; finish = { kind: 'unknown' };
+          push(chunk) { this.data = chunk.blocks; this.finish = { kind: chunk.finish }; }
+          blocks() { return this.data; }
+          message(source) { return { role: 'assistant', content: this.data, source }; }
+        }
+        export function createToolResultMessage(input) {
+          return { role: 'tool', toolCallId: input.callId, content: input.content, isError: input.isError };
+        }
+      `,
+          }));
+        },
+      },
+    ],
+  });
+  const { runSkillModel } = await import(
+    'data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64')
+  );
+  const call = { type: 'tool-call', id: 'call1', name: 'skill', arguments: '{"name":"reply"}' };
+  const controller = new AbortController();
+  const messages = [];
+  let requests = 0;
+  let executions = 0;
+  const params = {
+    context: {
+      llm: {
+        async *stream(options) {
+          requests += 1;
+          if (requests === 1) yield { blocks: [call], finish: 'tool-calls' };
+          else {
+            assert.equal(options.messages[1].toolCallId, 'call1');
+            assert.equal(options.messages[1].content[0].text, '技能正文');
+            yield { blocks: [{ type: 'text', text: '最终回复' }], finish: 'stop' };
+          }
+        },
+      },
+    },
+    options: { provider: 'test', model: 'test', messages, signal: controller.signal },
+    skills: {
+      tools: [],
+      execute: async () => {
+        executions += 1;
+        return '技能正文';
+      },
+    },
+    onReasoning: () => {},
+  };
+  assert.equal((await runSkillModel(params)).blocks()[0].text, '最终回复');
+  assert.equal(executions, 1);
+  params.context.llm.stream = async function* () {
+    yield { blocks: [call], finish: 'length' };
+  };
+  await assert.rejects(runSkillModel(params), /未完整生成/);
+  assert.equal(executions, 1);
+  params.context.llm.stream = async function* () {
+    yield { blocks: [call], finish: 'tool-calls' };
+  };
+  await assert.rejects(runSkillModel(params), /轮次超过上限/);
+  assert.equal(executions, 9);
+  controller.abort();
+  await assert.rejects(runSkillModel(params));
+  assert.equal(executions, 9);
+});
+
+test('联网搜索沿用当前模型路由，保留来源并限制次数，不泄露供应商异常', async () => {
+  const { createWebSearch } = await import('../src/host/web-search.ts');
+  const traces = [];
+  const requests = [];
+  const controller = new AbortController();
+  const web = {
+    searchReady: async (provider) => provider === 'test-provider',
+    search: async (request, signal) => {
+      assert.equal(signal.aborted, false);
+      requests.push(request);
+      return {
+        sources: [
+          {
+            url: 'https://example.com/news',
+            title: '官方消息',
+            snippet: '已发布',
+            publishedAt: '2026-11-25',
+          },
+          { url: 'javascript:alert(1)', title: '无效链接' },
+          { url: 'https://user:secret@example.com/' },
+        ],
+        truncated: false,
+      };
+    },
+  };
+  const tools = await createWebSearch({
+    web,
+    provider: 'test-provider',
+    signal: controller.signal,
+    onTrace: (trace) => traces.push(trace),
+  });
+  const call = (query) =>
+    tools.execute({
+      name: 'web_search',
+      id: 'search1',
+      type: 'tool-call',
+      arguments: JSON.stringify({ query }),
+    });
+  assert.equal(tools.tools[0].name, 'web_search');
+  await assert.rejects(call(' '), /关键词/);
+  await assert.rejects(call('x'.repeat(501)), /关键词/);
+  const output = JSON.parse(await call(' 最新版本 '));
+  assert.deepEqual(requests[0], { query: '最新版本', maxResults: 6, llmProvider: 'test-provider' });
+  assert.equal(output.sources.length, 1);
+  assert.equal(output.sources[0].publishedAt, '2026-11-25');
+  assert.ok(output.searchedAt);
+  assert.ok(traces.some((trace) => trace.toolCalls[0].result.includes('https://example.com/news')));
+  web.search = async () => {
+    throw new Error('secret-api-key');
+  };
+  await assert.rejects(
+    call('公开信息'),
+    (error) => !error.message.includes('secret-api-key') && error.message.includes('失败'),
+  );
+  await assert.rejects(call('公开信息'), /失败/);
+  await assert.rejects(call('公开信息'), /3 次上限/);
+  controller.abort();
+  await assert.rejects(call('公开信息'));
+});
+
+test('未配置搜索或凭据不可用时不声明联网能力，取消仍向上传递', async () => {
+  const { createWebSearch } = await import('../src/host/web-search.ts');
+  for (const web of [
+    undefined,
+    { searchReady: async () => false },
+    {
+      searchReady: async () => {
+        throw new Error('credentials');
+      },
+    },
+  ]) {
+    const tools = await createWebSearch({
+      web,
+      provider: 'test',
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(tools.tools, []);
+    assert.match(tools.prompt, /联网搜索当前不可用/);
+    assert.match(tools.prompt, /Asia\/Shanghai/);
+  }
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(createWebSearch({ provider: 'test', signal: controller.signal }));
+});
+
+test('可选宿主服务独立加载与卸载，不阻断基础接口及依赖访问', async () => {
+  const { connectHostServices } = await import('../src/host/host-services.ts');
+  const registrations = new Map();
+  const base = {
+    llm: {},
+    attachments: {},
+    agentDefaultModel: {},
+    connection: {},
+    inject: (names, callback) => registrations.set(names[0], callback),
+    effect: () => {},
+    on: () => {},
+    get skills() {
+      throw new Error('未声明依赖不能访问');
+    },
+    get web() {
+      throw new Error('未声明依赖不能访问');
+    },
+  };
+  const host = connectHostServices(base);
+  assert.equal(host.llm, base.llm);
+  assert.equal(host.web, undefined);
+  assert.equal(host.skills, undefined);
+  const cleanups = [];
+  const web = {};
+  registrations.get('web')({ web, effect: (register) => cleanups.push(register()) });
+  assert.equal(host.web, web);
+  assert.equal(host.skills, undefined);
+  const skills = {};
+  registrations.get('skills')({ skills, effect: (register) => cleanups.push(register()) });
+  assert.equal(host.skills, skills);
+  cleanups[0]();
+  assert.equal(host.web, undefined);
+  assert.equal(host.skills, skills);
+  cleanups[1]();
+  assert.equal(host.skills, undefined);
+});
+
+test('实时处理快照在生成期间可见，完整回复前不发送，不写入历史记录', async () => {
+  let release;
+  let started;
+  const ready = new Promise((resolve) => {
+    started = resolve;
+  });
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const updates = [];
+  const h = harness(
+    { ...config(), mode: 'auto' },
+    {
+      progress: (record, active) => updates.push({ record, active }),
+      generate: async (_text, _history, _config, _signal, _scope, _event, onTrace) => {
+        onTrace({ partialAnswer: '生成中', reasoning: '模型返回内容', steps: ['联网查询'] });
+        started();
+        await gate;
+        return '完整回复';
+      },
+    },
+  );
+  const task = h.p.accept(event());
+  await ready;
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.records.length, 0);
+  assert.equal(updates.at(-1).record.answer, '生成中');
+  assert.equal(updates.at(-1).record.inProgress, true);
+  release();
+  await task;
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.records[0].answer, '完整回复');
+  assert.equal(h.records[0].trace.partialAnswer, undefined);
+  assert.equal(updates.at(-1).active, false);
+});
+
+test('工具实时状态就地更新，已发布快照保持不变', async () => {
+  const snapshots = [];
+  const trace = createProcessingTrace(0, (snapshot) => snapshots.push(snapshot));
+  await traceTool({
+    tool: 'search',
+    purpose: '联网搜索',
+    onTrace: trace.update,
+    run: async () => {
+      assert.equal(snapshots.at(-1).toolCalls[0].status, 'running');
+      return 'ok';
+    },
+  });
+  assert.equal(snapshots[0].toolCalls[0].status, 'running');
+  assert.equal(trace.finish().toolCalls.length, 1);
+  assert.equal(trace.finish().toolCalls[0].status, 'success');
+});
+
+test('内部流式预览仅提取 answer，不显示规则与发送字段', async () => {
+  const { internalAnswerPreview } = await import('../src/host/stream-preview.ts');
+  assert.equal(internalAnswerPreview('{"answer":"正在查询'), '正在查询');
+  assert.equal(
+    internalAnswerPreview('{"answer":"你好\\n朋友","rules":"secret","send":"私密"}'),
+    '你好\n朋友',
+  );
+  assert.equal(internalAnswerPreview('{"rules":"secret"'), '');
+  assert.equal(internalAnswerPreview('无效JSON'), '');
+});
+
+test('Markdown 图文在临时目录准备完成后仅提交一次，保留顺序和幂等键', async () => {
+  const { sendMessage } = await import('../src/host/dws/send-message.ts');
+  const { readFile, access } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const c = config();
+  const target = eligible(event(), c);
+  let calls = 0;
+  let directory;
+  const receipt = await sendMessage(
+    {
+      config: c,
+      target,
+      text: '**开头**\n![图片](https://example.com/photo.png)\n结尾',
+      signal: new AbortController().signal,
+    },
+    {
+      download: async (params) => {
+        assert.equal(params.url, 'https://example.com/photo.png');
+        return { data: Buffer.from('image bytes'), extension: 'png' };
+      },
+      send: async (args, params) => {
+        calls += 1;
+        directory = params.cwd;
+        assert.equal(params.input, '**开头**\n![图片](./image-0.png)\n结尾');
+        assert.equal(await readFile(join(directory, 'image-0.png'), 'utf8'), 'image bytes');
+        assert.equal(args[args.indexOf('--idempotency-key') + 1], target.key);
+        assert.ok(args.includes('--markdown'));
+        assert.ok(args.includes('--wait-delivery'));
+        return { deliveryStatus: 'delivered' };
+      },
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(receipt.deliveryStatus, 'delivered');
+  await assert.rejects(access(directory));
+});
+
+test('图片准备失败不发送，拒绝本机路径与无效图片格式', async () => {
+  const { sendMessage, MessagePreparationError } = await import('../src/host/dws/send-message.ts');
+  const { markdownImages } = await import('../src/host/dws/markdown-images.ts');
+  const { imageExtension, imageUrl, downloadImage } =
+    await import('../src/host/dws/image-download.ts');
+  for (const text of [
+    '![x](./secret.png)',
+    '![x](file:///tmp/image.png)',
+    '![x](data:image/png;base64,AAA)',
+    '<img src="file:///secret">',
+    '![x][ref]\n\n[ref]: https://example.com/a.png',
+  ])
+    assert.throws(() => markdownImages(text));
+  assert.throws(() => imageUrl('https://user:pass@example.com/a.png'));
+  assert.throws(() => imageUrl('http://localhost/a.png'));
+  assert.throws(() => imageExtension(Buffer.from('<html>not an image</html>')));
+  assert.equal(imageExtension(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'png');
+  const signal = new AbortController().signal;
+  await assert.rejects(downloadImage({ url: 'http://127.0.0.1/a.png', signal }), /内网/);
+  let sent = false;
+  await assert.rejects(
+    sendMessage(
+      {
+        config: config(),
+        target: eligible(event(), config()),
+        text: '![x](https://example.com/a.png)',
+        signal,
+      },
+      {
+        download: async () => {
+          throw new Error('下载失败');
+        },
+        send: async () => {
+          sent = true;
+          return {};
+        },
+      },
+    ),
+    MessagePreparationError,
+  );
+  assert.equal(sent, false);
+});
+
+test('图片准备错误记为未发送失败，不标记投递状态未知', async () => {
+  const { MessagePreparationError } = await import('../src/host/dws/send-message.ts');
+  const h = harness(
+    { ...config(), mode: 'auto' },
+    {
+      send: async () => {
+        throw new MessagePreparationError('图片下载失败');
+      },
+    },
+  );
+  await h.p.accept(event());
+  assert.equal(h.records[0].status, 'error');
+  assert.equal(h.records[0].error, '图片下载失败');
+});
+
+test('代理 Fake-IP 使用真实公网解析，不能借回查放行内网或保留地址', async () => {
+  const { resolveImageAddress } = await import('../src/host/dws/image-address.ts');
+  const params = { hostname: 'picsum.photos', signal: new AbortController().signal };
+  let publicCalls = 0;
+  const resolver = {
+    system: async () => ['198.18.0.212'],
+    public: async () => {
+      publicCalls += 1;
+      return ['104.26.5.30'];
+    },
+  };
+  assert.equal(await resolveImageAddress(params, resolver), '104.26.5.30');
+  assert.equal(publicCalls, 1);
+  resolver.public = async () => ['127.0.0.1'];
+  await assert.rejects(resolveImageAddress(params, resolver), /内网/);
+  resolver.public = async () => ['198.18.0.1'];
+  await assert.rejects(resolveImageAddress(params, resolver), /保留地址/);
+  resolver.public = async () => {
+    throw new Error('private connection detail');
+  };
+  await assert.rejects(resolveImageAddress(params, resolver), /Fake-IP/);
+  await assert.rejects(
+    resolveImageAddress({ ...params, hostname: '198.18.0.212' }, resolver),
+    /保留地址/,
+  );
+  await assert.rejects(
+    resolveImageAddress({ ...params, hostname: 'server.local' }, resolver),
+    /内网域名/,
+  );
+  resolver.system = async () => ['10.0.0.1'];
+  await assert.rejects(resolveImageAddress(params, resolver), /内网/);
+  resolver.system = async () => ['104.26.5.30'];
+  assert.equal(await resolveImageAddress(params, resolver), '104.26.5.30');
+});
+
+test('确认草稿发送使用原文和原目标，先保存账本且重复请求不再次发送', async () => {
+  const { sendDraft } = await import('../src/host/send-draft.ts');
+  const record = {
+    time: '2026-11-25T12:00:00Z',
+    kind: 'direct',
+    target: 'friend',
+    sender: 'friend',
+    status: 'draft',
+    answer: '原样发送 **草稿**',
+  };
+  const ledger = {};
+  const actions = [];
+  let updated;
+  const params = {
+    request: { kind: record.kind, target: record.target, time: record.time, text: '替换正文' },
+    config: config(),
+    records: [record],
+    ledger,
+    saveLedger: async () => {
+      actions.push('ledger');
+    },
+    verifyAccount: async () => {
+      actions.push('verify');
+    },
+    saveRecord: async (result) => {
+      updated = result;
+    },
+    send: async (target, text) => {
+      actions.push('send');
+      assert.equal(ledger[target.key].status, 'sending');
+      assert.equal(target.target, 'friend');
+      assert.equal(text, record.answer);
+      return { deliveryStatus: 'delivered' };
+    },
+  };
+  await sendDraft(params);
+  assert.deepEqual(actions, ['verify', 'ledger', 'send', 'ledger']);
+  assert.equal(updated.status, 'delivered');
+  assert.equal(updated.time, record.time);
+  await assert.rejects(sendDraft(params), /不会重复发送/);
+  assert.equal(actions.filter((item) => item === 'send').length, 1);
+  await assert.rejects(sendDraft({ ...params, records: [{ ...record, origin: 'owner' }] }), /草稿/);
+});
+
+test('草稿发送准备失败可重试，提交后异常必须标为未知并阻止重发', async () => {
+  const { sendDraft } = await import('../src/host/send-draft.ts');
+  const { MessagePreparationError } = await import('../src/host/dws/send-message.ts');
+  const record = {
+    time: '2026-11-25T12:00:00Z',
+    kind: 'direct',
+    target: 'friend',
+    sender: 'friend',
+    status: 'draft',
+    answer: '草稿',
+  };
+  const ledger = {};
+  let updated;
+  const params = {
+    request: record,
+    config: config(),
+    records: [record],
+    ledger,
+    saveLedger: async () => {},
+    verifyAccount: async () => {},
+    saveRecord: async (result) => {
+      updated = result;
+    },
+    send: async () => {
+      throw new MessagePreparationError('图片失败');
+    },
+  };
+  await assert.rejects(sendDraft(params), /图片失败/);
+  assert.equal(Object.keys(ledger).length, 0);
+  assert.equal(updated, undefined);
+  params.send = async () => {
+    throw new Error('network');
+  };
+  await sendDraft(params);
+  assert.equal(updated.status, 'unknown');
+  await assert.rejects(sendDraft(params), /不会重复发送/);
 });

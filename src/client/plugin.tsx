@@ -17,7 +17,7 @@ export function apply(context: ClientContext): void {
         name: 'sidebar.panellist',
         id: 'dws-reply',
         order: 6,
-        label: () => '钉钉个人代答',
+        label: () => '钉钉代答',
       },
       Icon,
     ),

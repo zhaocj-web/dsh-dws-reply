@@ -4,6 +4,7 @@ import type { ToolCallRecord } from '../../shared/types';
 type ToolCallListProps = { calls?: ToolCallRecord[] };
 
 const statusLabels = {
+  running: '调用中',
   success: '完成',
   failed: '失败',
   cancelled: '已取消',
@@ -17,7 +18,7 @@ export function ToolCallList(props: ToolCallListProps) {
       {props.calls?.length ? (
         <ul className="dpr-tool-call-list">
           {props.calls.map((call, index) => (
-            <li key={`${call.time}-${index}`}>
+            <li key={call.id ?? `${call.time}-${index}`}>
               <div className="dpr-tool-call-heading">
                 <strong>{call.tool}</strong>
                 <span>

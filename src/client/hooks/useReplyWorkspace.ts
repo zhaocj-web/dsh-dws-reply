@@ -86,8 +86,11 @@ export function useReplyWorkspace(rpc: RpcClient) {
   };
   useEffect(() => {
     let alive = true;
-    const load = () =>
-      call('get')
+    let loading = false;
+    const load = () => {
+      if (loading) return;
+      loading = true;
+      return call('get')
         .then((result) => {
           if (alive) {
             setSnapshot(result);
@@ -95,14 +98,22 @@ export function useReplyWorkspace(rpc: RpcClient) {
             setDraftConfig((currentDraft) => currentDraft || result.config);
           }
         })
-        .catch((error) => alive && setError(errorMessage(error)));
+        .catch((error) => alive && setError(errorMessage(error)))
+        .finally(() => {
+          loading = false;
+        });
+    };
     load();
-    const id = setInterval(load, 3000);
+    const id = setInterval(load, isBusy || snapshot?.state.activeRecords?.length ? 750 : 3000);
     return () => {
       alive = false;
       clearInterval(id);
     };
-  }, [rpc]);
+  }, [rpc, isBusy, snapshot?.state.activeRecords?.length]);
+  const sendDraft = async (payload: RpcRequests['sendDraft']): Promise<void> => {
+    const result = await call('sendDraft', payload);
+    setSnapshot(result);
+  };
   const chatWithModel = async (payload: RpcRequests['internalChat']): Promise<void> => {
     const matches = (rule: ReplyConfig['conversationRules'][number]) =>
       rule.kind === payload.kind && rule.targetId === payload.target;
@@ -186,6 +197,7 @@ export function useReplyWorkspace(rpc: RpcClient) {
     }
   };
   return {
+    sendDraft,
     queryKnowledge,
     chatWithModel,
     setRuntimeEnabled,

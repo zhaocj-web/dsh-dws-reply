@@ -18,6 +18,7 @@ const client = await build({
   platform: 'browser',
   format: 'cjs',
   external: ['react'],
+  alias: { 'react/jsx-runtime': './src/client/markdown-jsx-runtime.ts' },
   loader: { '.css': 'text' },
   banner: {
     js: 'window.__ModuleLoader__.load({id:"dsh-dws-reply",factory:(require)=>{var module={exports:{}};var exports=module.exports;',

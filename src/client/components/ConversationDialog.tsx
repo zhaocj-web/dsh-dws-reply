@@ -19,9 +19,13 @@ export function ConversationDialog(props: ConversationDialogProps) {
   const messages = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const titleId = useId();
+  const active = (props.snapshot.state.activeRecords ?? []).filter(
+    (record) => record.kind === props.kind && record.target === props.target,
+  );
   const records = props.snapshot.state.records.filter(
     (record) => record.kind === props.kind && record.target === props.target,
   );
+  const displayed = [...active, ...records];
   useEffect(() => {
     dialog.current?.showModal();
     if (messages.current) messages.current.scrollTop = messages.current.scrollHeight;
@@ -29,14 +33,17 @@ export function ConversationDialog(props: ConversationDialogProps) {
   useLayoutEffect(() => {
     if (followLatest.current && messages.current)
       messages.current.scrollTop = messages.current.scrollHeight;
-  }, [records.length, records[0]?.time]);
+  }, [records.length, records[0]?.time, active[0]?.trace?.durationMs, active[0]?.answer]);
   return (
     <dialog
       ref={dialog}
       style={{ width: 860 }}
       className="dpr-rule-dialog dpr-chat-dialog"
       aria-labelledby={titleId}
-      onClose={props.onClose}
+      onClose={(event) => {
+        // 嵌套预览的关闭事件不能卸载外层对话。
+        if (event.target === event.currentTarget) props.onClose();
+      }}
     >
       <DialogHeader closeLabel="关闭对话" onClose={() => dialog.current?.close()}>
         <div>
@@ -55,13 +62,13 @@ export function ConversationDialog(props: ConversationDialogProps) {
             followLatest.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80;
         }}
       >
-        {records.length ? (
+        {displayed.length ? (
           <div className="dpr-chat-history">
-            {[...records].reverse().map((record, index) => (
+            {[...displayed].reverse().map((record) => (
               <RecordChat
                 showCopy
                 showTrace
-                key={`${record.time}-${index}`}
+                key={`${record.requestId ?? record.messageId ?? record.time}-${record.target}`}
                 record={record}
                 name={props.name}
               />
